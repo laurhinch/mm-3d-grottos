@@ -45,5 +45,6 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
+          awk -v v="## ${GITHUB_REF_NAME#v}" '$0 == v {on=1; next} /^## / {on=0} on' CHANGELOG.md > notes.md
           gh release create "$GITHUB_REF_NAME" build/mm_recomp_3d_grottos.nrm dist/*.zip \
-            --title "$GITHUB_REF_NAME" --notes-file CHANGELOG.md --verify-tag
+            --title "$GITHUB_REF_NAME" --notes-file notes.md --verify-tag

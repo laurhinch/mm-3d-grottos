@@ -1,6 +1,6 @@
 [manifest]
 id = "mm_recomp_3d_grottos"
-version = "1.0.0"
+version = "1.1.0"
 display_name = "3D Grottos"
 description = "Replaces flat 2d grotto holes with an actual 3d pit."
 short_description = "Replaces grotto sprites with 3d holes"
