@@ -1,0 +1,29 @@
+# Build output
+build/
+dist/
+*.o
+*.d
+*.elf
+*.bin
+*.map
+
+# Recomp tools
+/RecompModTool
+/RecompModTool.exe
+/N64Recomp
+/N64Recomp.exe
+
+# ROMs
+*.z64
+*.n64
+*.v64
+
+# Windows build leftovers
+*.exe
+*.dll
+*.lib
+*.pdb
+*.exp
+
+# Editor
+.vscode/settings.json

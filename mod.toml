@@ -1,0 +1,67 @@
+[manifest]
+id = "mm_recomp_3d_grottos"
+version = "1.0.0"
+display_name = "3D Grottos"
+description = "Replaces flat 2d grotto holes with an actual 3d pit."
+short_description = "Replaces grotto sprites with 3d holes"
+authors = [ "yharna" ]
+game_id = "mm"
+minimum_recomp_version = "1.2.2"
+dependencies = []
+optional_dependencies = []
+native_libraries = []
+
+[inputs]
+elf_path = "build/mod.elf"
+mod_filename = "mm_recomp_3d_grottos"
+func_reference_syms_file = "Zelda64RecompSyms/mm.us.rev1.syms.toml"
+data_reference_syms_files = [ "Zelda64RecompSyms/mm.us.rev1.datasyms.toml", "Zelda64RecompSyms/mm.us.rev1.datasyms_static.toml" ]
+additional_files = [ "thumb.png" ]
+
+[[manifest.config_options]]
+id = "enabled"
+name = "3D Grotto Holes"
+description = "Off uses the vanilla decal."
+type = "Enum"
+options = [ "On", "Off" ]
+default = "On"
+
+[[manifest.config_options]]
+id = "pit_depth"
+name = "Pit Depth"
+description = "How deep the pit is, in world units."
+type = "Number"
+min = 20
+max = 150
+step = 5
+precision = 0
+percent = false
+default = 60
+
+[[manifest.config_options]]
+id = "pit_width"
+name = "Pit Width"
+description = "Size of the opening compared to the vanilla decal."
+type = "Number"
+min = 80
+max = 120
+step = 1
+precision = 0
+percent = true
+default = 100
+
+[[manifest.config_options]]
+id = "pit_style"
+name = "Pit Style"
+description = "Earthen is dirt fading to black, Shadowed is darker, Void is plain black like vanilla."
+type = "Enum"
+options = [ "Earthen", "Shadowed", "Void" ]
+default = "Earthen"
+
+[[manifest.config_options]]
+id = "rim_blend"
+name = "Soil Rim"
+description = "Soft ring of dirt around the opening that blends the edge into the ground."
+type = "Enum"
+options = [ "On", "Off" ]
+default = "On"
