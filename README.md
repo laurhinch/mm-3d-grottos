@@ -2,7 +2,7 @@
 
 A [Majora's Mask: Recompiled](https://github.com/Zelda64Recomp/Zelda64Recomp) mod that replaces the flat grotto sprite with an actual 3d model!
 
-![Link standing at the edge of a grotto](https://raw.githubusercontent.com/laurhinch/mm-3d-grottos/main/docs/screenshot.png)
+![Link standing at the edge of a grotto](https://github.com/laurhinch/mm-3d-grottos/blob/main/docs/screenshot.png?raw=true)
 
 Requires Zelda 64: Recompiled 1.2.2 or newer.
 
