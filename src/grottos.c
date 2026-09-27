@@ -2,6 +2,7 @@
 #include "modding.h"
 #include "overlays/actors/ovl_Door_Ana/z_door_ana.h"
 #include "recompconfig.h"
+#include "rt64_extended_gbi.h"
 #include "z64recomp_api.h"
 #include "z64skin_matrix.h"
 
@@ -68,7 +69,8 @@ static const u8 sStyleColors[STYLE_MAX][STYLE_STOPS][3] = {
 #define MAX_DRAW_DIST 2500.0f
 
 #define SWITCH_DELAY_FRAMES 4
-#define VIEW_CHECK_MARGIN 1.05f
+#define VIEW_CHECK_MARGIN 1.1f
+#define VIEW_CHECK_RIM_RAYS 12
 #define VIEW_CHECK_LIFT 3.0f
 
 #define VTX_SCALE 10.0f
@@ -83,6 +85,10 @@ typedef struct {
   Mtx *mtx;
   u8 mode;
   u8 clearFrames;
+  u8 occludersReady;
+  u16 occluderStart;
+  u16 occluderCount;
+  u32 occluderGeneration;
   f32 rimSampleWidth;
   f32 rimInnerY[SEGS];
   f32 rimOuterY[SEGS];
@@ -106,6 +112,7 @@ typedef struct {
   PitVert floor[RING_VTX];
   PitVert floorCenter;
   f32 maxRadius;
+  f32 rimLight[3];
   Vtx *wallVtx;
   Vtx *floorVtx;
   Vtx *floorCenterVtx;
@@ -193,8 +200,31 @@ static void SetVtx(Vtx *v, const PitVert *p, f32 y, u8 alpha) {
   v->v.cn[3] = alpha;
 }
 
-static void BuildPitShape(GraphicsContext *gfxCtx, PitShape *shape,
-                          s32 jagged) {
+// light the pit the same as the rest of the scene
+static void SceneLight(PlayState *play, f32 nx, f32 ny, f32 nz, f32 *out) {
+  LightInfo *suns[2] = {&play->envCtx.dirLight1, &play->envCtx.dirLight2};
+
+  for (s32 c = 0; c < 3; c++) {
+    out[c] = play->lightCtx.ambientColor[c];
+  }
+  for (s32 i = 0; i < ARRAY_COUNT(suns); i++) {
+    LightDirectional *sun = &suns[i]->params.dir;
+    f32 dot = (nx * sun->x + ny * sun->y + nz * sun->z) / 127.0f;
+
+    if (dot > 0.0f) {
+      for (s32 c = 0; c < 3; c++) {
+        out[c] += sun->color[c] * dot;
+      }
+    }
+  }
+  for (s32 c = 0; c < 3; c++) {
+    out[c] = MIN(out[c], 255.0f) / 255.0f;
+  }
+}
+
+static void BuildPitShape(PlayState *play, PitShape *shape, s32 jagged) {
+  GraphicsContext *gfxCtx = play->state.gfxCtx;
+  f32 light[3];
   f32 radius = RIM_RADIUS * sConfig.width;
   f32 wallRepeats = MAX(
       1, (s32)(2.0f * M_PIf * radius * TEXELS_PER_WORLD_UNIT / PIT_TEX_SIZE +
@@ -217,6 +247,10 @@ static void BuildPitShape(GraphicsContext *gfxCtx, PitShape *shape,
       v->s = (f32)i / SEGS * wallRepeats * PIT_TEX_SIZE;
       v->t = sConfig.depth * d * TEXELS_PER_WORLD_UNIT;
       SetColor(v, d);
+      SceneLight(play, -Math_CosS(angle), 0.0f, -Math_SinS(angle), light);
+      v->r *= light[0];
+      v->g *= light[1];
+      v->b *= light[2];
       shape->maxRadius = MAX(shape->maxRadius, r);
     }
   }
@@ -224,6 +258,7 @@ static void BuildPitShape(GraphicsContext *gfxCtx, PitShape *shape,
     shape->floor[i] = shape->walls[RINGS - 1][i];
     SetPlanarUV(&shape->floor[i]);
   }
+  SceneLight(play, 0.0f, 1.0f, 0.0f, shape->rimLight);
   shape->floorCenter = shape->floor[0];
   shape->floorCenter.pos.x = shape->floorCenter.pos.z = 0.0f;
   SetPlanarUV(&shape->floorCenter);
@@ -259,8 +294,15 @@ static Gfx *LoadPitTexture(Gfx *gfx) {
    G_TT_NONE | G_TL_TILE | G_TD_CLAMP | G_TP_PERSP | (cycleType) |             \
    G_PM_NPRIMITIVE)
 
+static Gfx *EndPitDraw(Gfx *gfx) {
+  gEXPopMatrixGroup(gfx++, G_MTX_MODELVIEW);
+  return gfx;
+}
+
 static Gfx *SetupPitDraw(Gfx *gfx, Mtx *mtx, PitPass pass) {
   gDPPipeSync(gfx++);
+  gEXMatrixGroupNoInterpolate(gfx++, G_EX_PUSH, G_MTX_MODELVIEW,
+                              G_EX_EDIT_NONE);
   gSPMatrix(gfx++, mtx, G_MTX_NOPUSH | G_MTX_LOAD | G_MTX_MODELVIEW);
   gSPClearGeometryMode(gfx++, G_LIGHTING | G_CULL_BOTH | G_TEXTURE_GEN |
                                   G_TEXTURE_GEN_LINEAR | G_FOG);
@@ -458,6 +500,7 @@ static void DrawFlattenedPit(PlayState *play, Actor *actor, Mtx *mtx) {
   OPEN_DISPS(play->state.gfxCtx);
   POLY_OPA_DISP = SetupPitDraw(POLY_OPA_DISP, mtx, PASS_OPA);
   POLY_OPA_DISP = DrawTriangles(POLY_OPA_DISP, vtx, sFlatCount);
+  POLY_OPA_DISP = EndPitDraw(POLY_OPA_DISP);
   CLOSE_DISPS(play->state.gfxCtx);
 }
 
@@ -468,6 +511,7 @@ static void DrawRealPit(PlayState *play, Mtx *mtx) {
   POLY_OPA_DISP = SetupPitDraw(POLY_OPA_DISP, mtx, PASS_DEPTH_CLEAR);
   POLY_OPA_DISP =
       DrawDisc(POLY_OPA_DISP, shape->wallVtx, shape->openingCenterVtx);
+  POLY_OPA_DISP = EndPitDraw(POLY_OPA_DISP);
   POLY_OPA_DISP = SetupPitDraw(POLY_OPA_DISP, mtx, PASS_OPA);
   for (s32 ring = 0; ring < RINGS - 1; ring++) {
     POLY_OPA_DISP = DrawBand(POLY_OPA_DISP, &shape->wallVtx[ring * RING_VTX],
@@ -475,6 +519,7 @@ static void DrawRealPit(PlayState *play, Mtx *mtx) {
   }
   POLY_OPA_DISP =
       DrawDisc(POLY_OPA_DISP, shape->floorVtx, shape->floorCenterVtx);
+  POLY_OPA_DISP = EndPitDraw(POLY_OPA_DISP);
   CLOSE_DISPS(play->state.gfxCtx);
 }
 
@@ -543,7 +588,13 @@ static void DrawRim(PlayState *play, Actor *actor, GrottoData *data,
   for (s32 i = 0; i < RING_VTX; i++) {
     s32 seg = i % SEGS;
     PitVert in = shape->walls[0][i];
-    PitVert out = in;
+    PitVert out;
+
+    SetColor(&in, 0.0f);
+    in.r *= shape->rimLight[0];
+    in.g *= shape->rimLight[1];
+    in.b *= shape->rimLight[2];
+    out = in;
 
     in.pos.x *= RIM_INNER_SCALE;
     in.pos.z *= RIM_INNER_SCALE;
@@ -556,6 +607,7 @@ static void DrawRim(PlayState *play, Actor *actor, GrottoData *data,
   OPEN_DISPS(play->state.gfxCtx);
   POLY_XLU_DISP = SetupPitDraw(POLY_XLU_DISP, data->mtx, PASS_XLU);
   POLY_XLU_DISP = DrawBand(POLY_XLU_DISP, inner, outer);
+  POLY_XLU_DISP = EndPitDraw(POLY_XLU_DISP);
   CLOSE_DISPS(play->state.gfxCtx);
 }
 
@@ -572,36 +624,265 @@ static Mtx *GrottoMatrix(PlayState *play, Actor *actor) {
   return mtx;
 }
 
-static s32 HasClearView(PlayState *play, Actor *actor) {
-  Vec3f eye = play->view.eye;
-  f32 radius =
-      sRealShape.maxRadius * (actor->scale.x / 0.01f) * VIEW_CHECK_MARGIN;
-  f32 dx;
-  f32 dz;
-  f32 len = Math_Vec3f_DistXZAndStore(&eye, &actor->world.pos, &dx, &dz);
+// fall back to the 2d fake-3d flat grotto render when the view is blocked
+// waits a few frames to return to the full 3d version
+#define OCCLUDER_MIN_HEIGHT 2.0f
+#define OCCLUDER_RADIUS 1000.0f
+#define MAX_OCCLUDERS 4096
+#define MAX_DL_DEPTH 8
+#define MAX_DL_COMMANDS 65536
 
-  if (len < 1.0f) {
-    return true;
+typedef struct {
+  Vec3s v[3];
+} Occluder;
+
+typedef struct {
+  Room *room;
+  Vec3f center;
+  Vtx *cache[32];
+  s32 commands;
+  u32 branchTarget;
+} OccluderScan;
+
+static OccluderScan sOccluderScan;
+static Occluder sOccluders[MAX_OCCLUDERS];
+static s32 sOccluderCount;
+static u32 sOccluderGeneration = 1;
+static void *sOccluderRoomSegment;
+
+static void *RoomPtr(Room *room, u32 addr) {
+  if ((addr >> 24) == 0x03) {
+    return (u8 *)room->segment + (addr & 0xFFFFFF);
   }
-  for (s32 side = -1; side <= 1; side += 2) {
-    Vec3f target = actor->world.pos;
-    Vec3f hit;
-    CollisionPoly *poly;
-    s32 bgId;
+  if ((addr >> 28) == 0x8) {
+    return (void *)addr;
+  }
+  return NULL;
+}
 
-    target.x += -dz / len * radius * side;
-    target.z += dx / len * radius * side;
-    target.y += VIEW_CHECK_LIFT;
-    if (BgCheck_EntityLineTest1(&play->colCtx, &eye, &target, &hit, &poly, true,
-                                true, true, true, &bgId)) {
-      return false;
+static void CollectTriangle(OccluderScan *scan, s32 i0, s32 i1, s32 i2) {
+  Vtx *v[3] = {scan->cache[i0 & 31], scan->cache[i1 & 31],
+               scan->cache[i2 & 31]};
+  f32 cx;
+  f32 cz;
+  s16 maxY;
+  Occluder *occ;
+
+  if ((v[0] == NULL) || (v[1] == NULL) || (v[2] == NULL) ||
+      (sOccluderCount >= MAX_OCCLUDERS)) {
+    return;
+  }
+  maxY = MAX(MAX(v[0]->v.ob[1], v[1]->v.ob[1]), v[2]->v.ob[1]);
+  cx = CLAMP(scan->center.x,
+             MIN(MIN(v[0]->v.ob[0], v[1]->v.ob[0]), v[2]->v.ob[0]),
+             MAX(MAX(v[0]->v.ob[0], v[1]->v.ob[0]), v[2]->v.ob[0]));
+  cz = CLAMP(scan->center.z,
+             MIN(MIN(v[0]->v.ob[2], v[1]->v.ob[2]), v[2]->v.ob[2]),
+             MAX(MAX(v[0]->v.ob[2], v[1]->v.ob[2]), v[2]->v.ob[2]));
+  if ((maxY < scan->center.y + OCCLUDER_MIN_HEIGHT) ||
+      (SQ(cx - scan->center.x) + SQ(cz - scan->center.z) >
+       SQ(OCCLUDER_RADIUS))) {
+    return;
+  }
+  occ = &sOccluders[sOccluderCount++];
+  for (s32 k = 0; k < 3; k++) {
+    occ->v[k].x = v[k]->v.ob[0];
+    occ->v[k].y = v[k]->v.ob[1];
+    occ->v[k].z = v[k]->v.ob[2];
+  }
+}
+
+static void ScanDList(OccluderScan *scan, Gfx *dl, s32 depth) {
+  if ((dl == NULL) || (depth > MAX_DL_DEPTH)) {
+    return;
+  }
+  for (; scan->commands++ < MAX_DL_COMMANDS; dl++) {
+    u32 w0 = dl->words.w0;
+    u32 w1 = dl->words.w1;
+
+    switch (w0 >> 24) {
+    case G_VTX: {
+      s32 n = (w0 >> 12) & 0xFF;
+      s32 start = ((w0 & 0xFF) >> 1) - n;
+      Vtx *vtx = RoomPtr(scan->room, w1);
+
+      for (s32 i = 0; (i < n) && (start + i < 32); i++) {
+        if (start + i >= 0) {
+          scan->cache[start + i] = (vtx != NULL) ? &vtx[i] : NULL;
+        }
+      }
+      break;
+    }
+    case G_TRI1:
+      CollectTriangle(scan, ((w0 >> 16) & 0xFF) / 2, ((w0 >> 8) & 0xFF) / 2,
+                      (w0 & 0xFF) / 2);
+      break;
+    case G_TRI2:
+    case G_QUAD:
+      CollectTriangle(scan, ((w0 >> 16) & 0xFF) / 2, ((w0 >> 8) & 0xFF) / 2,
+                      (w0 & 0xFF) / 2);
+      CollectTriangle(scan, ((w1 >> 16) & 0xFF) / 2, ((w1 >> 8) & 0xFF) / 2,
+                      (w1 & 0xFF) / 2);
+      break;
+    case G_DL:
+      ScanDList(scan, RoomPtr(scan->room, w1), depth + 1);
+      if (((w0 >> 16) & 0xFF) == G_DL_NOPUSH) {
+        return;
+      }
+      break;
+    case G_RDPHALF_1:
+      scan->branchTarget = w1;
+      break;
+    case G_BRANCH_Z:
+      ScanDList(scan, RoomPtr(scan->room, scan->branchTarget), depth + 1);
+      break;
+    case G_ENDDL:
+      return;
+    }
+  }
+}
+
+// level geometry without collision, like the termina field tal grass, is
+// missed by the raycast but still get messed up by the depth
+// clear. we collect the raised geo around each grotto in the room and test
+// against that too
+static void CollectOccluders(PlayState *play, Actor *actor, GrottoData *data) {
+  OccluderScan *scan = &sOccluderScan;
+  Room *rooms[2] = {&play->roomCtx.curRoom, &play->roomCtx.prevRoom};
+
+  data->occluderStart = sOccluderCount;
+  scan->center = actor->world.pos;
+
+  for (s32 i = 0; i < ARRAY_COUNT(rooms); i++) {
+    Room *room = rooms[i];
+    RoomShape *shape = room->roomShape;
+    s32 count;
+    u8 *entries;
+    s32 stride;
+    s32 opaOffset;
+
+    if ((room->num < 0) || (shape == NULL) || (room->segment == NULL)) {
+      continue;
+    }
+    if (shape->base.type == ROOM_SHAPE_TYPE_NORMAL) {
+      count = shape->normal.numEntries;
+      entries = RoomPtr(room, (u32)shape->normal.entries);
+      stride = sizeof(RoomShapeDListsEntry);
+      opaOffset = offsetof(RoomShapeDListsEntry, opa);
+    } else if (shape->base.type == ROOM_SHAPE_TYPE_CULLABLE) {
+      count = shape->cullable.numEntries;
+      entries = RoomPtr(room, (u32)shape->cullable.entries);
+      stride = sizeof(RoomShapeCullableEntry);
+      opaOffset = offsetof(RoomShapeCullableEntry, opa);
+    } else {
+      continue;
+    }
+    if (entries == NULL) {
+      continue;
+    }
+    scan->room = room;
+    scan->commands = 0;
+    for (s32 e = 0; e < count; e++) {
+      Gfx *opa = *(Gfx **)(entries + e * stride + opaOffset);
+
+      for (s32 c = 0; c < 32; c++) {
+        scan->cache[c] = NULL;
+      }
+      if (opa != NULL) {
+        ScanDList(scan, RoomPtr(room, (u32)opa), 0);
+      }
+    }
+  }
+  data->occluderCount = sOccluderCount - data->occluderStart;
+  data->occluderGeneration = sOccluderGeneration;
+  data->occludersReady = (sOccluderCount < MAX_OCCLUDERS);
+}
+
+static s32 SegmentHitsOccluder(const Vec3f *from, const Vec3f *dir,
+                               const Occluder *occ) {
+  Vec3f v0 = {occ->v[0].x, occ->v[0].y, occ->v[0].z};
+  Vec3f e1 = {occ->v[1].x - v0.x, occ->v[1].y - v0.y, occ->v[1].z - v0.z};
+  Vec3f e2 = {occ->v[2].x - v0.x, occ->v[2].y - v0.y, occ->v[2].z - v0.z};
+  Vec3f p;
+  Vec3f t;
+  Vec3f q;
+  f32 det;
+  f32 u;
+  f32 v;
+  f32 hit;
+
+  Math3D_Vec3f_Cross((Vec3f *)dir, &e2, &p);
+  det = DOTXYZ(e1, p);
+  if (fabsf(det) < 1e-6f) {
+    return false;
+  }
+  Math_Vec3f_Diff((Vec3f *)from, &v0, &t);
+  u = DOTXYZ(t, p) / det;
+  if ((u < 0.0f) || (u > 1.0f)) {
+    return false;
+  }
+  Math3D_Vec3f_Cross(&t, &e1, &q);
+  v = DOTXYZ((*dir), q) / det;
+  if ((v < 0.0f) || (u + v > 1.0f)) {
+    return false;
+  }
+  hit = DOTXYZ(e2, q) / det;
+  return (hit > 0.0f) && (hit < 1.0f);
+}
+
+static s32 OccludersBlock(GrottoData *data, const Vec3f *eye,
+                          const Vec3f *target) {
+  Vec3f dir;
+
+  Math_Vec3f_Diff((Vec3f *)target, (Vec3f *)eye, &dir);
+  for (s32 i = 0; i < data->occluderCount; i++) {
+    if (SegmentHitsOccluder(eye, &dir, &sOccluders[data->occluderStart + i])) {
+      return true;
+    }
+  }
+  return false;
+}
+
+static s32 ViewBlocked(PlayState *play, GrottoData *data, Vec3f *eye,
+                       Vec3f *target) {
+  Vec3f hit;
+  CollisionPoly *poly;
+  s32 bgId;
+
+  return BgCheck_EntityLineTest1(&play->colCtx, eye, target, &hit, &poly, true,
+                                 true, true, true, &bgId) ||
+         OccludersBlock(data, eye, target);
+}
+
+static s32 HasClearView(PlayState *play, Actor *actor, GrottoData *data) {
+  static const struct {
+    s32 count;
+    f32 radius;
+  } sRings[] = {{1, 0.0f}, {6, 0.5f}, {VIEW_CHECK_RIM_RAYS, VIEW_CHECK_MARGIN}};
+  Vec3f eye = play->view.eye;
+  f32 radius = sRealShape.maxRadius * (actor->scale.x / 0.01f);
+
+  if ((Math_Vec3f_DistXZ(&eye, &actor->world.pos) > OCCLUDER_RADIUS) ||
+      !data->occludersReady ||
+      (data->occluderGeneration != sOccluderGeneration)) {
+    return false;
+  }
+  for (s32 r = 0; r < ARRAY_COUNT(sRings); r++) {
+    for (s32 i = 0; i < sRings[r].count; i++) {
+      s16 angle = (s16)(i * 0x10000 / sRings[r].count);
+      Vec3f target = actor->world.pos;
+
+      target.x += radius * sRings[r].radius * Math_CosS(angle);
+      target.z += radius * sRings[r].radius * Math_SinS(angle);
+      target.y += VIEW_CHECK_LIFT;
+      if (ViewBlocked(play, data, &eye, &target)) {
+        return false;
+      }
     }
   }
   return true;
 }
 
-// a blocked view switches the grotto to the flattened version immediately, but
-// waits a few frames to return to the full 3d versin
 static s32 UpdateClearView(GrottoData *data, s32 clearNow) {
   data->clearFrames =
       clearNow ? MIN(data->clearFrames + 1, SWITCH_DELAY_FRAMES) : 0;
@@ -621,6 +902,11 @@ RECOMP_HOOK("Scene_Draw") void Grottos_BeforeSceneDraw(PlayState *play) {
   s32 enabled = (recomp_get_config_u32("enabled") == OPTION_ON);
 
   sFrameReady = false;
+  if (sOccluderRoomSegment != play->roomCtx.curRoom.segment) {
+    sOccluderRoomSegment = play->roomCtx.curRoom.segment;
+    sOccluderCount = 0;
+    sOccluderGeneration++;
+  }
   for (Actor *actor = play->actorCtx.actorLists[ACTORCAT_ITEMACTION].first;
        actor != NULL; actor = actor->next) {
     GrottoData *data;
@@ -641,12 +927,20 @@ RECOMP_HOOK("Scene_Draw") void Grottos_BeforeSceneDraw(PlayState *play) {
     }
     if (!sFrameReady) {
       ReadConfig(&sConfig);
-      BuildPitShape(play->state.gfxCtx, &sRealShape, true);
-      BuildPitShape(play->state.gfxCtx, &sFlatShape, false);
+      BuildPitShape(play, &sRealShape, true);
+      BuildPitShape(play, &sFlatShape, false);
       sFrameReady = true;
     }
     data->mtx = GrottoMatrix(play, actor);
-    if (UpdateClearView(data, HasClearView(play, actor))) {
+    if (data->occluderGeneration != sOccluderGeneration) {
+      CollectOccluders(play, actor, data);
+    }
+    // check if we're in cutscene mode. for some reason link's vertices will
+    // explode if the real 3d grotto is rendered while some cutscenes like SoT
+    // and inverse SoT play. to be safe, we just fall back to the 2d projection
+    // matrix trick while in cutscenes.
+    if (!Play_InCsMode(play) &&
+        UpdateClearView(data, HasClearView(play, actor, data))) {
       data->mode = PIT_REAL;
     } else {
       data->mode = PIT_FLATTENED;
